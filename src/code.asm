@@ -21,7 +21,7 @@
 	int 0x80
 
 ;
-; fcnt(socket, F_SETFL=4, O_RDWR=2 | O_NONBLOCK=2048) // make the socket non-blocking
+; fcntl(socket, F_SETFL=4, O_RDWR=2 | O_NONBLOCK=2048) // make the socket non-blocking
 ;
 	; __syscall 55,   socket,    4,    2048 | 2
 
@@ -34,8 +34,8 @@
 ; bind(serverSock, (sockaddr*) &addr, sizeof(addr))
 ;
 	; __syscall 361, socket, sockaddr, sockaddr_len
-
-	mov eax, 361
+		
+	mov ax, 361
 	mov ecx, sockaddr
 	shr edx, 7 ; (2048|2)>>7 = 16 = sockaddr_len
 	int 0x80
@@ -52,6 +52,10 @@
 	bts dword [fd_set], ebx ; set the server socket bit
 	
 	xor edx, edx    ; edx = 0 and stays 0 throughout the program
+	
+	; esp -> ('html', 0)
+	push byte 0
+	push dword 'html'
 
 main_loop:
 	; copy 'fd_set' to 'fd_set_read'
@@ -69,7 +73,9 @@ main_loop:
 	;   mov byte [ecx], cl     ; Linux may destroy the "timeout" after the select call
 	;   __syscall 0x8E, ebx, fd_set_read, 0, 0, esi
 
-	mov eax, 0x8E
+	xor eax, eax
+	mov al, 0x8E
+	
 	mov ecx, esi
 	xor esi, esi
 	mov [edi], di
@@ -85,9 +91,15 @@ nextfd:
 
 	; if (cur_fd == server_fd)
 	cmp edi, 3
-	jne not_server_fd
+	jne end_if_server_fd
 		; __syscall 364, edi, 0, 0, 2048         ; eax = accept4(serversock, null, null, SOCK_NONBLOCK=2048)
-		mov eax, 364
+		
+		; At this point, the value of eax can be:
+		; from select()         : eax = number of readable sockets
+		; from a serverfd read  : eax = the new socket fd
+		; from a clientfd read  : eax = the total number of bytes in the buffer if it was < 7, or the last parsed byte
+		; from a finished client: eax = 6
+		mov ax, 364  ; we can be certain that eax<256
 		mov ebx, edi ; ebx = socket
 		xor ecx, ecx ; ecx = 0
 		mov esi, 2048
@@ -96,9 +108,9 @@ nextfd:
 		bts [fd_set], eax                   ; set bit in [fd_set]
 		mov dword [ebp + 4*eax], ecx ; buffer_pos[n] = 0
 		jmp nextfd
-	not_server_fd:
+		end_if_server_fd:
 
-	; eax=readable sockets   ebx=maxfd+1   ecx=fd_set_read   edx=0   esi=0   edi=fd
+	; eax=num_readable   ebx=maxfd+1   ecx=fd_set_read   edx=0   esi=0   edi=fd
 
 	mov ecx, edi
 	shl ecx, 16
@@ -109,9 +121,9 @@ nextfd:
 	; read(socket=EDI, &buffer[ buffer_pos[socket] ], 4096)
 	; __syscall 3, edi, ecx, 4096
 	
-	mov al, 3      ; eax = number of readable sockets, returned from select(), assume this is < 256
+	mov al, 3      ; eax was <256
 	mov ebx, edi
-	mov dh, 16     ; 4096 = 16<<8
+	mov dh, 16     ; edx was 0 and 4096 = 16<<8
 	int 0x80
 	xor edx, edx
 
@@ -133,48 +145,58 @@ nextfd:
 	cmp al, '/'
 	jne bad_request
 
-	mov dword [esi-5], 'html' ; turns "GET /blabla" into "html/blabla", setting up a chroot used 5 more bytes
+	; turn "GET /path" into "html/path"
+	mov ebp, [esp]
+	mov dword [esi-5], ebp
 
 	mov bl, al ; bl = '/'
 
+	xor eax, eax
+	
 	next_url_char:
 		lodsb
 
+		; if (al==' ' || al=='\n') { finished parsing } else if (al<' ') { bad_request }
 		cmp al, ' '
-		jg not_space_or_newline
+		jg end_if_space_or_newline
 		je end_url
 			cmp al, 13 ; newline
 				je end_url
-			jmp bad_request ; control char
-			not_space_or_newline:
+			; jmp bad_request ; control char
+			
+			bad_request:
+				push '400.'
+				xor eax, eax
+				jmp send_esp_eax_close
+			
+			end_if_space_or_newline:
 
 		cmp al, '.'
-		jne not_dot
+		jne end_if_dot
 			cmp bl, '/'
 				je forbidden ; do not allow '/.'
-			xor ebx, ebx
-			not_dot:
+			end_if_dot:
 
 		mov bl, al
 
 		cmp al, 0x7E   ; > 0x7E: extended ascii
 			jg bad_request
 
-		cmp si, word [ecx] ; if (esi != n) repeat
+		cmp si, word [ecx] ; do { next_url_char } while (esi != n);
 			jne next_url_char
 
 		jmp nextfd ; finished parsing, didn't find a newline
 
 	end_url:
-		dec esi            ; esi = first char past URL
+		dec esi            ; esi = first char past path
 		mov byte [esi], dl ; zero-terminate string
 
-		mov ebp, esi       ; ebp = end of url
-		xor si, si        ; esi = start of url
+		mov ebp, esi       ; ebp = end of path
+		xor si, si         ; esi = start of path (read buffers are 16-bit aligned)
 
 		; __syscall 0x6A, esi, stat ; fstat(esi)
 		
-		mov eax, 0x6A
+		mov al, 0x6A
 		mov ebx, esi
 		mov ecx, stat
 		int 0x80
@@ -183,17 +205,14 @@ nextfd:
 			jnz not_found
 
 		bt word [stat+8], 14 ; if (is_directory)
-		jnc not_dir
-			xchg ebp, esp
+		jnc end_if_dir
+			xchg ebp, esp  ; save esp
 			add esp, 12    ; esp = 12 bytes past end of URL
-			push `tml\0` ; push "/index.html",0) onto esp,
-			push `ex.h`    ; pointing to the end of the URL
-			push `/ind`    ; this is cheaper than 3 times "mov [ebp]"
-			xchg ebp, esp  ; restore esp 
-
-			not_dir:
-
-		mov ebp, '200.'
+			push `tml\0`   ; add ('index.html',0) to the filename
+			push `ex.h`
+			push `/ind`
+			xchg ebp, esp  ; restore esp
+			end_if_dir:
 		
 		;__syscall 5, esi, edx, edx ; eax = open(esi, 0, 0)
 		mov al, 5    ; safe because fstat() returned eax=0
@@ -202,19 +221,17 @@ nextfd:
 		int 0x80
 		
 		cmp eax, edx
-		jge not_forbidden
-			forbidden:
-			xor eax, eax
-			mov ebp, '403.'
-			not_forbidden:
+		jl forbidden ; if (open() < 0) { 403 error }
+		
+		push '200.'
 
-	send_ebp_eax_close:           ; ebp=(200.|400.|403.|404.) eax=resource_fd
-		mov ebx, header
-		mov dword [ebx], ebp; write the HTTP status code into "files/xxx.html"
+	send_esp_eax_close:           ; esp=(200.html | 400.html | 403.html | 404.html) eax=(resource_fd | 0)
 		mov ebp, eax
-
+		
 		;__syscall 5, ebx, 0, 0 ; eax = open(ebx=header)
 		mov al, 5 ; eax is either 0 or a file descriptor, so assume ah=0
+		mov ebx, esp ; ebx -> ("200.html",0)
+		pop ecx      ; esp -> ("html",0)
 		xor ecx, ecx
 		int 0x80
 
@@ -235,7 +252,8 @@ nextfd:
 			; expensive in terms of code size.
 
 			; __syscall 6, ecx ; close(file_fd)
-			mov eax, 6
+			xor eax, eax
+			add al, 6
 			mov ebx, ecx
 			int 0x80
 
@@ -256,12 +274,13 @@ nextfd:
 
 		jmp nextfd
 
-not_found:
-	mov ebp, '404.'
+forbidden:
+	push '403.'
 	jmp clear_close
 
-bad_request:
-	mov ebp, '400.'
-	clear_close:
+not_found:
+	push '404.'
+
+clear_close:
 	xor eax, eax
-	jmp send_ebp_eax_close
+	jmp send_esp_eax_close

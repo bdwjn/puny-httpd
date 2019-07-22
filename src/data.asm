@@ -2,8 +2,6 @@
 ; DATA / BSS section
 ;
 
-header            db '200.html'
-
 	sockaddr:
 	  sin_family: db 0x00, 0x00  ; AF_INET
 	  sin_port  : db 0x30, 0x39  ; port 12345
