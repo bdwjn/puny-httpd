@@ -97,9 +97,9 @@ nextfd:
 		; At this point, the value of eax can be:
 		; from select()         : eax = number of readable sockets
 		; from a serverfd read  : eax = the new socket fd
-		; from a clientfd read  : eax = the total number of bytes in the buffer if it was < 7, or the last parsed byte
+		; from a clientfd read  : eax = the total number of bytes in the buffer if it was < 7, or the last two parsed bytes
 		; from a finished client: eax = 6
-		mov ax, 364  ; we can be certain that eax<256
+		mov ax, 364  ; we can be certain that eax<65536
 		mov ebx, edi ; ebx = socket
 		xor ecx, ecx ; ecx = 0
 		mov esi, 2048
@@ -121,7 +121,7 @@ nextfd:
 	; read(socket=EDI, &buffer[ buffer_pos[socket] ], 4096)
 	; __syscall 3, edi, ecx, 4096
 	
-	mov al, 3      ; eax was <256
+	mov ax, 3      ; eax was <65536
 	mov ebx, edi
 	mov dh, 16     ; edx was 0 and 4096 = 16<<8
 	int 0x80
@@ -148,36 +148,29 @@ nextfd:
 	; turn "GET /path" into "html/path"
 	mov ebp, [esp]
 	mov dword [esi-5], ebp
-
-	mov bl, al ; bl = '/'
-
-	xor eax, eax
 	
 	next_url_char:
+		mov ah, al
 		lodsb
 
-		; if (al==' ' || al=='\n') { finished parsing } else if (al<' ') { bad_request }
+		; if (al<' ') { bad_request } else if (al==' ' || al=='\n') { end_url }
 		cmp al, ' '
 		jg end_if_space_or_newline
-		je end_url
+			je end_url
 			cmp al, 13 ; newline
-				je end_url
-			; jmp bad_request ; control char
-			
+				je end_url		
+
 			bad_request:
-				push '400.'
-				xor eax, eax
-				jmp send_esp_eax_close
-			
-			end_if_space_or_newline:
+			push '400.'
+			jmp clear_eax_send_esp_eax_close
+		end_if_space_or_newline:
 
-		cmp al, '.'
-		jne end_if_dot
-			cmp bl, '/'
-				je forbidden ; do not allow '/.'
-			end_if_dot:
-
-		mov bl, al
+		cmp ax, './'
+		jne end_if_slashdot
+			forbidden:
+			push '403.'
+			jmp clear_eax_send_esp_eax_close			
+		end_if_slashdot:
 
 		cmp al, 0x7E   ; > 0x7E: extended ascii
 			jg bad_request
@@ -196,13 +189,17 @@ nextfd:
 
 		; __syscall 0x6A, esi, stat ; fstat(esi)
 		
+		xor eax, eax
 		mov al, 0x6A
 		mov ebx, esi
 		mov ecx, stat
 		int 0x80
 
 		and eax, eax
-			jnz not_found
+		jz end_if_not_found
+			push '404.'
+			jmp clear_eax_send_esp_eax_close
+		end_if_not_found:
 
 		bt word [stat+8], 14 ; if (is_directory)
 		jnc end_if_dir
@@ -212,7 +209,7 @@ nextfd:
 			push `ex.h`
 			push `/ind`
 			xchg ebp, esp  ; restore esp
-			end_if_dir:
+		end_if_dir:
 		
 		;__syscall 5, esi, edx, edx ; eax = open(esi, 0, 0)
 		mov al, 5    ; safe because fstat() returned eax=0
@@ -224,7 +221,10 @@ nextfd:
 		jl forbidden ; if (open() < 0) { 403 error }
 		
 		push '200.'
+		jmp send_esp_eax_close
 
+	clear_eax_send_esp_eax_close:
+		xor eax, eax
 	send_esp_eax_close:           ; esp=(200.html | 400.html | 403.html | 404.html) eax=(resource_fd | 0)
 		mov ebp, eax
 		
@@ -273,14 +273,3 @@ nextfd:
 		btc [fd_set], edi ; remove EDI from the master fd_set
 
 		jmp nextfd
-
-forbidden:
-	push '403.'
-	jmp clear_close
-
-not_found:
-	push '404.'
-
-clear_close:
-	xor eax, eax
-	jmp send_esp_eax_close
