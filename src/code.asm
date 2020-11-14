@@ -59,7 +59,7 @@ main_loop:
 ;
 	xor eax, eax
 	mov al, 0x8E     ; eax = select
-                     ; ebx = max_fd + 1
+	                 ; ebx = max_fd + 1
 	mov ecx, esp     ; ecx = &fd_set_readable
 	                 ; edx = 0
 	xor esi, esi     ; esi = 0
@@ -68,7 +68,7 @@ main_loop:
 	push eax         ; number of seconds = 0x8E = 142
 	mov edi, esp
 	int 0x80
-	pop eax          ; esp -> { fd_set, fd_set_readable }
+	pop eax          ; esp -> { fd_set_readable, fd_set }
 	pop eax
 
 next_readable_fd:
@@ -214,9 +214,11 @@ finish_response:
 
 	mov ebx, `200\0`
 
-send_header_and_file:     ; open [esp], sendfile it, then if (!CF) sendfile eax
+send_header_and_file:
+	; open ebx, sendfile it, then if (!CF) sendfile eax
+	
 	; eax = !CF ? file descriptor : undefined
-	; ebx = status code
+	; ebx = header filename
 	; ecx = (undefined)
 	; edx = 0
 	; esi = (unused) end of filename
@@ -224,25 +226,26 @@ send_header_and_file:     ; open [esp], sendfile it, then if (!CF) sendfile eax
 
 	mov edi, eax
 
-	mov [esi], ebx
-	mov ebx, esi    ; ebx -> header filename
-
 ;
 ; open(header_filename, O_RDONLY, 0)
 ;
 	xor eax, eax
 	mov al, 5
+	mov [esi], ebx  ; use the end of the buffer to store the header filename
+	mov ebx, esi    ; ebx -> header filename
 	xor ecx, ecx
 	int 0x80
 
 sendfile:
 ;
-; sendfile(socket_fd, file_fd, 0, max=0x100000)
+; sendfile(socket_fd, file_fd, 0, max=esi)
 ;
 	mov ecx, eax     ; ecx = file_fd
 	mov al, 0xBB     ; sendfile
 	mov ebx, ebp     ; ebx = socket_fd
-	mov esi, 0x100000
+	                 ; esi = 0x00200000 + 0x10000 * sockfd which is
+	                 ; roughly 2MB, this is a nice value for sendfile
+	                 ; so we don't explicitly set it.
 	int 0x80
 
 	jc close

@@ -1,7 +1,7 @@
 # puny-httpd
 One of the tiniest HTTP servers on the planet.
 
-* Currently weighing in at **418 bytes** (ELF binary)
+* Currently weighing in at **413 bytes** (ELF binary)
 * Written in **x86 ASM** (32-bit, for smaller instructions/addresses)
 * **No dependencies**, only Linux syscalls
 
