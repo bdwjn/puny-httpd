@@ -1,7 +1,7 @@
 # puny-httpd
 One of the tiniest HTTP servers on the planet.
 
-* Currently weighing in at **468 bytes** (ELF binary)
+* Currently weighing in at **418 bytes** (ELF binary)
 * Written in **x86 ASM** (32-bit, for smaller instructions/addresses)
 * **No dependencies**, only Linux syscalls
 
@@ -20,7 +20,7 @@ Of course, some corners had to be cut:
     * not contain `/.` (oh look, a security feature!)
 * **Maximum filesize of 1 MB**, as files are sent using a single [sendfile(2)](https://linux.die.net/man/2/sendfile) call.
   * No error checking on this either, if Linux decides to only send half the file, tough luck.
-* The ELF header loads code and data in the same memory section. This saves 32 bytes, but it means that **CODE IS WRITABLE** and **DATA IS EXECUTABLE**.
+* **The code is writable and data is executable**. The ELF header loads code and data in the same memory section. This is extremely bad practice, but it saves 32 bytes!
 
 ## Requirements
 
