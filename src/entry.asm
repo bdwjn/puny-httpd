@@ -7,9 +7,7 @@ BITS 32
 	db      1, 1, 1, 0,
 
 prestart:
-	; we can put 8 bytes of program code here, excluding the "jmp"
-	; this saves a whopping 6 bytes :-)
-
+	; we can put 8 bytes of program code here
 	mov ax, 359 ; 4 bytes
 	inc ebx     ; 1 byte
 	inc ebx     ; 1 byte
@@ -30,6 +28,7 @@ phdr:
 	dd      filesize                ; e_shnum       ; p_filesz
 	                                ; e_shstrndx
 	dd      filesize + BSS_SIZE                     ; p_memsz
+timeout:
 	dd      7                                       ; p_flags (the entire program is mode R/W/X)
 	dd      0x1000                                  ; p_align
 

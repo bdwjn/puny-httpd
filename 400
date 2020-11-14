@@ -1,0 +1,11 @@
+HTTP/1.0 400 Bad request
+Server: puny-httpd/1.1
+Connection: close
+
+<html>
+<head><title>400 Bad Request</title></head>
+<body bgcolor="white">
+<center><h1>400 Bad Request</h1></center>
+<hr><center>puny-httpd/1.1</center>
+</body>
+</html>

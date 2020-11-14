@@ -1,275 +1,261 @@
 ;
 ; eax = socket(AF_INET=2, SOCK_STREAM=1, 0)
 ;
-	; __syscall 359, 2, 1, 0
-
-	; At this point eax=359, ebx=2, ecx=0, edx=0 (see entry.asm), and we only need to "inc ecx".
+	; At this point eax=359, ebx=2, ecx=0, edx=0 (see entry.asm), and we only need to 'inc ecx'.
 	inc ecx
 	int 0x80
 
 ;
-; set_sockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &rval, sizeof(rval))
+; set_sockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &rval, sizeof(rval))
 ;
-	; __syscall 366, socket, 1, 2, fd_set_read, 4
+	xchg eax, ebx ; eax=2   ebx=server_fd ecx=1 edx=0
+	xchg eax, edx ; eax=0   ebx=server_fd ecx=1 edx=2=SO_REUSEADDR
+	; any nonzero value will enable the SO_REUSEADDR option, so we push a value
+	; that we can use later: the initial value of 'fd_set'
+	push 8        ; eax=0   ebx=server_fd ecx=1 edx=2 [esp] = 8
+	mov esi, esp  ; eax=0   ebx=server_fd ecx=1 edx=2 [esi] = 8
+	mov ax, 366   ; eax=366 ebx=server_fd ecx=1 edx=2 [esi] = 8
+	mov di, 4     ; eax=366 ebx=server_fd ecx=1 edx=2 [esi] = 8 edi=4
 
-	xchg eax, ebx ; eax=2   ebx=socket ecx=1 edx=0
-	xchg eax, edx ; eax=0   ebx=socket ecx=1 edx=2
-	push 1        ; eax=0   ebx=socket ecx=1 edx=2 [esp] = 1
-	mov esi, esp  ; eax=0   ebx=socket ecx=1 edx=2 [esi] = 1
-	mov ax, 366   ; eax=366 ebx=socket ecx=1 edx=2 [esi] = 1
-	mov di, 4     ; eax=366 ebx=socket ecx=1 edx=2 [esi] = 1 edi=4
 	int 0x80
 
 ;
-; fcntl(socket, F_SETFL=4, O_RDWR=2 | O_NONBLOCK=2048) // make the socket non-blocking
+; fcntl(server_fd, F_SETFL=4, O_RDWR=2 | O_NONBLOCK=2048) // make the socket non-blocking
 ;
-	; __syscall 55,   socket,    4,    2048 | 2
-
 	mov al, 55
 	mov ecx, edi
 	mov dh, 8
 	int 0x80
 
 ;
-; bind(serverSock, (sockaddr*) &addr, sizeof(addr))
+; bind(server_fd, (sockaddr*) &addr, sizeof(addr))
 ;
-	; __syscall 361, socket, sockaddr, sockaddr_len
-		
 	mov ax, 361
 	mov ecx, sockaddr
-	shr edx, 7 ; (2048|2)>>7 = 16 = sockaddr_len
+	shr edx, 7       ; (2048|2)>>7 = 16 = sockaddr_len
 	int 0x80
 
 ;
-;	listen(serverSock, 16)
+;	listen(server_fd, 16)
 ;
-	; __syscall 363, ebx, 16
-
 	mov ax, 363
 	mov ecx, edx
 	int 0x80
 
-	bts dword [fd_set], ebx ; set the server socket bit
-	
-	xor edx, edx    ; edx = 0 and stays 0 throughout the program
-	
-	; esp -> ('html', 0)
-	push byte 0
-	push dword 'html'
+	push eax         ; esp -> { 0, fd_set }
 
 main_loop:
-	; copy 'fd_set' to 'fd_set_read'
-	mov esi, fd_set ; esi = fd_set
-	lodsd           ; esi = fd_set_read   eax = [fd_set]
-	mov edi, esi    ; esi = fd_set_read   eax = [fd_set]   edi = fd_set_read
-	stosd           ; esi = fd_set_read   eax = [fd_set]   edi = timeout
 
-	; ebx = maxfd + 1
-	bsr ebx, eax
-	inc ebx
+	pop edx          ; edx = 0, esp -> { fd_set }
 
-	; select(maxfd+1, &fd_set_read, 0, 0, &timeout)
-	;   mov ecx, timeout
-	;   mov byte [ecx], cl     ; Linux may destroy the "timeout" after the select call
-	;   __syscall 0x8E, ebx, fd_set_read, 0, 0, esi
+	bsr ebx, [esp]   ; ebx = max_fd
+	inc ebx          ; ebx = max_fd + 1
+
+	push dword [esp] ; esp -> { fd_set_readable, fd_set }
+
+
+;
+; select(maxfd+1, &fd_set_readable, 0, 0, &timeout)
+;
+	xor eax, eax
+	mov al, 0x8E     ; eax = select
+                     ; ebx = max_fd + 1
+	mov ecx, esp     ; ecx = &fd_set_readable
+	                 ; edx = 0
+	xor esi, esi     ; esi = 0
+	
+	push eax         ; esp -> { timeout, fd_set_readable, fd_set }
+	push eax         ; number of seconds = 0x8E = 142
+	mov edi, esp
+	int 0x80
+	pop eax          ; esp -> { fd_set, fd_set_readable }
+	pop eax
+
+next_readable_fd:
+
+	bsr ebx, [esp]   ; ebx = fd
+	jz main_loop
+
+	btc [esp], ebx
+
+	; if (fd == server_fd)
+	cmp ebx, 3
+	jne end_if_server_fd
+		;
+		; eax = clientfd = accept(server_fd, null, null, SOCK_NONBLOCK=2048)
+		;
+		mov eax, 364 ; eax = accept
+		             ; ebx = server_fd
+		xor ecx, ecx ; ecx = 0
+		             ; edx = 0
+		mov esi, 2048; esi = SOCK_NONBLOCK
+
+		int 0x80
+
+		bts [esp+4], eax ; set the bit in master fd_set
+
+		mov ch, al   ; ecx = 00 00    xx 00
+		add ch, 0x20 ; ecx = 00 00 20+xx 00
+		bswap ecx    ; ecx = 00 20+xx 00 00
+
+		mov dword [esp+4*eax-128], ecx ; reset the pointer for this clientfd
+
+		jmp next_readable_fd
+
+	end_if_server_fd:
+
+	;
+	; eax = read(fd, &buffer[fd][bytesRead], 256)
+	;
 
 	xor eax, eax
-	mov al, 0x8E
-	
-	mov ecx, esi
-	xor esi, esi
-	mov [edi], di
+	mov al, 3                  ; eax = sys_read
+	                           ; ebx = fd
+	mov ecx, [esp+4*ebx-128]
+	dec dl                     ; edx = 255
 	int 0x80
+	inc dl                     ; edx = 0
+	add ecx, eax               ; ecx = &buffer[fd][bytesRead]
 
-nextfd:
-	mov esi, fd_set_read
-	bsr edi, [esi] ; take the highest fd
-	jz main_loop
-	btc [esi], edi ; clear it
-
-	mov ebp, buffer_pos ; buffer_pos is used twice in the following code, loading it to ebp saves us 1 byte
-
-	; if (cur_fd == server_fd)
-	cmp edi, 3
-	jne end_if_server_fd
-		; __syscall 364, edi, 0, 0, 2048         ; eax = accept4(serversock, null, null, SOCK_NONBLOCK=2048)
-		
-		; At this point, the value of eax can be:
-		; from select()         : eax = number of readable sockets
-		; from a serverfd read  : eax = the new socket fd
-		; from a clientfd read  : eax = the total number of bytes in the buffer if it was < 7, or the last two parsed bytes
-		; from a finished client: eax = 6
-		mov ax, 364  ; we can be certain that eax<65536
-		mov ebx, edi ; ebx = socket
-		xor ecx, ecx ; ecx = 0
-		mov esi, 2048
-		int 0x80
-
-		bts [fd_set], eax                   ; set bit in [fd_set]
-		mov dword [ebp + 4*eax], ecx ; buffer_pos[n] = 0
-		jmp nextfd
-		end_if_server_fd:
-
-	; eax=num_readable   ebx=maxfd+1   ecx=fd_set_read   edx=0   esi=0   edi=fd
-
-	mov ecx, edi
-	shl ecx, 16
-	lea esi, [ebp + 4*edi] ; esi = & buffer_pos[socket]
-	add ecx, [esi]
-	add ecx, buffer               ; ecx = & buffer[n]
-
-	; read(socket=EDI, &buffer[ buffer_pos[socket] ], 4096)
-	; __syscall 3, edi, ecx, 4096
+	mov [esp+4*ebx-128], ecx   ; update bytesRead
 	
-	mov ax, 3      ; eax was <65536
-	mov ebx, edi
-	mov dh, 16     ; edx was 0 and 4096 = 16<<8
-	int 0x80
-	xor edx, edx
+	; if (client closed connection || buffer full)
+	test eax, eax
+		jz close
+	cmp ch, 0xFF               ; more than 0xff00 bytes? buffer is full
+		je close
 
-	test eax, eax  ; if read() == 0, then the connection was closed by client
-	jz close
 
-	add [esi], eax ; n = n + eax
-	xor cx, cx     ; ecx = buffer
-	xchg esi, ecx  ; esi = buffer   ecx = &n
+	cmp cx, 7                  ; don't parse with <7 bytes
+	jl next_readable_fd
 
-	cmp dword [esi], 7
-	jle nextfd     ; don't parse with less than 7 bytes, ("GET /",13,10) is the shortest valid request
+	mov esi, ecx
+	xor si, si
 
-	lodsd
+	; if (request doesn't start with "GET /")
+	lodsd	
 	cmp eax, 'GET '
-	jne bad_request
-
+	jne if_get_parse_failed
 	lodsb
 	cmp al, '/'
-	jne bad_request
+	je end_if_get_parse_failed
 
-	; turn "GET /path" into "html/path"
-	mov ebp, [esp]
-	mov dword [esi-5], ebp
-	
-	next_url_char:
-		mov ah, al
-		lodsb
+	if_get_parse_failed:
+		mov byte [esi], dl     ; clear the first byte so the parser throws a bad request
+	end_if_get_parse_failed:
 
-		; if (al<' ') { bad_request } else if (al==' ' || al=='\n') { end_url }
-		cmp al, ' '
-		jg end_if_space_or_newline
-			je end_url
-			cmp al, 13 ; newline
-				je end_url		
+	mov ebp, ebx ; ebp = socket
 
-			bad_request:
-			push '400.'
-			jmp clear_eax_send_esp_eax_close
-		end_if_space_or_newline:
+next_char:
 
-		cmp ax, './'
-		jne end_if_slashdot
-			forbidden:
-			push '403.'
-			jmp clear_eax_send_esp_eax_close			
-		end_if_slashdot:
-
-		cmp al, 0x7E   ; > 0x7E: extended ascii
-			jg bad_request
-
-		cmp si, word [ecx] ; do { next_url_char } while (esi != n);
-			jne next_url_char
-
-		jmp nextfd ; finished parsing, didn't find a newline
-
-	end_url:
-		dec esi            ; esi = first char past path
-		mov byte [esi], dl ; zero-terminate string
-
-		mov ebp, esi       ; ebp = end of path
-		xor si, si         ; esi = start of path (read buffers are 16-bit aligned)
-
-		; __syscall 0x6A, esi, stat ; fstat(esi)
+	lodsb
+	cmp al, ' '
+	jg end_if_space_or_newline ; if (al>' ') it's neither space or newline
+	je finish_response         ; else if (al==' ') it's a space
+	cmp al, 13                 ; else if (al==13) it's a newline
+		je finish_response
 		
-		xor eax, eax
-		mov al, 0x6A
-		mov ebx, esi
-		mov ecx, stat
-		int 0x80
+		bad_request:           ; else it's a control char: 400 Bad request
+		mov ebx, `400\0`
+		clc
+		jmp send_header_and_file
+	end_if_space_or_newline:
 
-		and eax, eax
-		jz end_if_not_found
-			push '404.'
-			jmp clear_eax_send_esp_eax_close
-		end_if_not_found:
+	cmp si, cx
+	jl next_char               ; do { next_char } while (pos < bytesRead)
 
-		bt word [stat+8], 14 ; if (is_directory)
-		jnc end_if_dir
-			xchg ebp, esp  ; save esp
-			add esp, 12    ; esp = 12 bytes past end of URL
-			push `tml\0`   ; add ('index.html',0) to the filename
-			push `ex.h`
-			push `/ind`
-			xchg ebp, esp  ; restore esp
-		end_if_dir:
+	jmp next_readable_fd
+
+finish_response:
+	dec esi
+	mov byte [esi], dl         ; buffer[fd][esi] = 0; // zero-terminate the filename
+
+	xor eax, eax
+	mov al, 5                  ; eax = open(filename, O_RDWR, 0)
+	mov ebx, esi               ;
+	xor bx, bx                 ; ebx = buffer[fd][0]
+	mov dword [ebx], 'html'    ; change "GET /bla.txt" into "html/bla.txt"
+	xor ecx, ecx
+	mov cl, 2                  ; ecx = O_RDWR
+	int 0x80
+
+	cmp al, 0xFE  ; if (ENOENT) error 404
+	jne end_if_not_found
+		mov ebx, `404\0`
+
+	end_if_not_found:
+
+	cmp al, 0xF3  ; if (EACCES) error 403
+	jne end_if_perm_denied
+		mov ebx, `403\0`
+	end_if_perm_denied:
+
+	cmp al, 0xEB  ; if (EISDIR)
+	jne end_if_directory
+		; remove any trailing slash
+		cmp byte [esi-1], '/'
+		jne end_if_trailing_slash
+			dec esi
+		end_if_trailing_slash:
 		
-		;__syscall 5, esi, edx, edx ; eax = open(esi, 0, 0)
-		mov al, 5    ; safe because fstat() returned eax=0
-		mov ebx, esi
-		xor ecx, ecx
-		int 0x80
+		; add "/index.html" to the filename
+		add esi, 12
+		xchg esp, esi
+		push `tml\0`
+		push `ex.h`
+		push `/ind`
+		xchg esp, esi
 		
-		cmp eax, edx
-		jl forbidden ; if (open() < 0) { 403 error }
-		
-		push '200.'
-		jmp send_esp_eax_close
+		; and retry
+		jmp finish_response
+	end_if_directory:
 
-	clear_eax_send_esp_eax_close:
-		xor eax, eax
-	send_esp_eax_close:           ; esp=(200.html | 400.html | 403.html | 404.html) eax=(resource_fd | 0)
-		mov ebp, eax
-		
-		;__syscall 5, ebx, 0, 0 ; eax = open(ebx=header)
-		mov al, 5 ; eax is either 0 or a file descriptor, so assume ah=0
-		mov ebx, esp ; ebx -> ("200.html",0)
-		pop ecx      ; esp -> ("html",0)
-		xor ecx, ecx
-		int 0x80
+	jae send_header_and_file ; if (no error) push 200 header
 
-		send_and_close_eax: ; this is run twice, once with eax=header_fd and once more with eax=resource_fd
-		
-			; __syscall 0xBB, edi, eax, edx, 0x100000 ; sendfile(edi, eax)
+	mov ebx, `200\0`
 
-			mov ecx, eax ;                                ecx = file_fd
-			mov al, 0xBB ; eax = 0xBB                     ecx = file_fd
-			mov ebx, edi ; eax = 0xBB   ebx = socket_fd   ecx = file_fd
-			mov esi, 0x100000
-			int 0x80
-			
-			; [TODO]
-			; The current code assumes sendfile() sends the whole file in one call.
-			; I'm not sure how reliable this is for large files. To turn this into a loop
-			; will require the file size, which means fseek or fstat calls, which will be
-			; expensive in terms of code size.
+send_header_and_file:     ; open [esp], sendfile it, then if (!CF) sendfile eax
+	; eax = !CF ? file descriptor : undefined
+	; ebx = status code
+	; ecx = (undefined)
+	; edx = 0
+	; esi = (unused) end of filename
+	; ebp = socket descriptor
 
-			; __syscall 6, ecx ; close(file_fd)
-			xor eax, eax
-			add al, 6
-			mov ebx, ecx
-			int 0x80
+	mov edi, eax
 
-		test ebp, ebp          ; ebp nonzero? then we have a resource file to send
-		jz no_resource
-			xchg eax, ebp  ; eax = ebp, ebp = 0
-			
-			jmp send_and_close_eax
-			no_resource:
+	mov [esi], ebx
+	mov ebx, esi    ; ebx -> header filename
 
-	close:
-		; __syscall 6, edi ; close(socket)
-		mov al, 6
-		mov ebx, edi
-		int 0x80
-		
-		btc [fd_set], edi ; remove EDI from the master fd_set
+;
+; open(header_filename, O_RDONLY, 0)
+;
+	xor eax, eax
+	mov al, 5
+	xor ecx, ecx
+	int 0x80
 
-		jmp nextfd
+sendfile:
+;
+; sendfile(socket_fd, file_fd, 0, max=0x100000)
+;
+	mov ecx, eax     ; ecx = file_fd
+	mov al, 0xBB     ; sendfile
+	mov ebx, ebp     ; ebx = socket_fd
+	mov esi, 0x100000
+	int 0x80
+
+	jc close
+
+	stc
+	mov eax, edi
+
+	jmp sendfile
+
+
+close:
+	btc [esp+4], ebx      ;   remove from master fd_set
+	xor eax, eax
+	mov al, 6
+	int 0x80              ;   close(fd)
+	jmp next_readable_fd
