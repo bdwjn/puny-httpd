@@ -165,6 +165,13 @@ next_char:
 	jl next_char               ; do { next_char } while (pos < bytesRead)
 
 	jmp next_readable_fd
+	
+close:
+	btc [esp+4], ebx      ;   remove from master fd_set
+	xor eax, eax
+	mov al, 6
+	int 0x80              ;   close(fd)
+	jmp next_readable_fd
 
 finish_response:
 	dec esi
@@ -254,11 +261,3 @@ sendfile:
 	mov eax, edi
 
 	jmp sendfile
-
-
-close:
-	btc [esp+4], ebx      ;   remove from master fd_set
-	xor eax, eax
-	mov al, 6
-	int 0x80              ;   close(fd)
-	jmp next_readable_fd
