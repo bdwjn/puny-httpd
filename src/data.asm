@@ -10,4 +10,4 @@ sockaddr:
   ;   sin_addr  : dd 0           ; INADDR_ANY
   ;   sin_zero  : dd 0, 0        ; zero
 
-BSS_SIZE          EQU (0x10000 + 0x10000 * 32)
+BSS_SIZE          EQU (0x1000000 * 32)
